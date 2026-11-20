@@ -160,14 +160,25 @@
     );
   }
 
-  function stat(label, value) {
+  function stat(label, value, hint) {
     return el('div', { class: 'stat' },
       el('span', { text: label }),
-      el('b', { text: value })
+      el('b', { text: value }),
+      hint ? el('small', { class: 'stat-hint', text: hint }) : null
     );
   }
 
   function hero() {
+    var pre = DATA.rows.filter(function (r) { return r.token_status === 'pre-token'; });
+    var watch = pre.filter(function (r) { return r.tvl_usd >= DATA.floor_usd; });
+    var values = watch.map(function (r) { return r.implied_value_usd; }).sort(function (a, b) { return a - b; });
+    var median = values.length ? values[Math.floor(values.length / 2)] : 0;
+    var topRow = watch.reduce(function (best, r) {
+      if (r.change_7d === null || r.change_7d === undefined) return best;
+      if (best === null || r.change_7d > best.change_7d) return r;
+      return best;
+    }, null);
+    var topGrowth = topRow === null ? null : topRow.change_7d;
     return el('section', { class: 'hero' },
       el('div', { class: 'hero-copy' },
         el('p', { class: 'eyebrow', text: DATA.watchlist_size + ' watchlist protocols · ranked by implied value' }),
@@ -175,10 +186,10 @@
         el('p', { class: 'lede', text: 'Every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record, ranked by a model built only from its own TVL, seven-day growth and time since listing. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor; ' + DATA.live_token_size + ' already-issued protocols ride along as comparison rows.' })
       ),
       el('div', { class: 'stats' },
-        stat('Watchlist covered', DATA.watchlist_size + ' / ' + DATA.watchlist_size),
-        stat('Pre-token rows', String(DATA.pre_token_size)),
-        stat('Early below floor', String(DATA.early_size)),
-        stat('Live comparisons', String(DATA.live_token_size))
+        stat('Watchlist', String(DATA.watchlist_size), DATA.watchlist_size + ' / ' + DATA.watchlist_size + ' covered'),
+        stat('Median implied', fmtUsd(median), watch.length + ' watchlist rows'),
+        stat('Top 7d growth', fmtPct(topGrowth), topRow ? topRow.name : 'watchlist high'),
+        stat('Pre-token rows', String(DATA.pre_token_size), DATA.early_size + ' below the floor')
       )
     );
   }
@@ -351,6 +362,7 @@
     var head = el('div', { class: 'board-head' },
       el('div', null,
         el('h2', { text: 'Ranked board' }),
+        el('p', { class: 'board-method', text: 'Method: implied = TVL × log-compressed multiple × tanh(7d growth) × maturity × category. Every input is from the snapshot; no name list.' }),
         el('span', { class: 'board-note', text: state.status === 'pre-token' ? 'Pre-token ranks, strongest model value first.' : state.status === 'live-token' ? 'Already-issued rows, shown as comparisons against the model.' : 'Every board row, pre-token and already-issued together.' })
       ),
       el('span', { class: 'board-note', text: list.length + ' shown · click a row for its model and farm plan' })
@@ -434,10 +446,19 @@
     );
   }
 
-  function decomp(label, value, total) {
+  function decomp(label, value, reason, total) {
     return el('div', { class: 'decomp-row' + (total ? ' total' : '') },
+      el('span', { class: 'decomp-label', text: label }),
+      el('b', { text: value }),
+      reason ? el('span', { class: 'decomp-reason', text: reason }) : null
+    );
+  }
+
+  function factor(label, value, reason) {
+    return el('div', { class: 'factor' },
       el('span', { text: label }),
-      el('b', { text: value })
+      el('b', { text: value }),
+      el('small', { text: reason })
     );
   }
 
@@ -449,7 +470,6 @@
 
     var isLive = row.token_status === 'live-token';
     var chains = row.chains && row.chains.length ? row.chains.join(', ') : 'unnamed chain';
-    var baseValue = row.tvl_usd * row.base_multiple;
 
     dialog.textContent = '';
     dialog.appendChild(el('div', { class: 'detail-top' },
@@ -474,18 +494,15 @@
       ),
       el('p', { class: 'value-note', text: isLive ? 'This token already trades. The value below is the model applied to its TVL, shown as a comparison against its recorded market cap.' : 'An estimate of what a token could be worth if the protocol record stayed as it is. It is not a price and not a promise that a token will be issued.' })
     );
-    var decomposition = el('div', { class: 'decomp' },
-      decomp('TVL', fmtUsd(row.tvl_usd)),
-      decomp('TVL multiple', '× ' + fmtMult(row.base_multiple)),
-      decomp('Base value', fmtUsd(baseValue)),
-      decomp('7d growth', fmtPct(row.change_7d) + ' → × ' + fmtMult(row.growth_multiplier)),
-      decomp('Age without a token', fmtAgeLong(row.age_days) + ' → × ' + fmtMult(row.maturity_multiplier)),
-      decomp('Category factor', (row.category || 'Other') + ' → × ' + fmtFactor(row.category_multiplier)),
-      decomp('Implied value', fmtUsd(row.implied_value_usd), true)
-    );
-    impliedSection.appendChild(decomposition);
+    impliedSection.appendChild(el('div', { class: 'value-formula', text: 'round(' + fmtUsd(row.tvl_usd) + ' × ' + fmtMult(row.base_multiple) + ' × ' + fmtMult(row.growth_multiplier) + ' × ' + fmtMult(row.maturity_multiplier) + ' × ' + fmtFactor(row.category_multiplier) + ') = ' + fmtUsd(row.implied_value_usd) }));
+    impliedSection.appendChild(el('div', { class: 'factor-grid' },
+      factor('Base · TVL × multiple', '× ' + fmtMult(row.base_multiple), fmtUsd(row.tvl_usd) + ' TVL; log compression keeps the largest protocol from owning the board.'),
+      factor('Growth factor', '× ' + fmtMult(row.growth_multiplier), fmtPct(row.change_7d) + ' over 7d, passed through tanh so the move stays mild and monotonic.'),
+      factor('Maturity factor', '× ' + fmtMult(row.maturity_multiplier), fmtAgeLong(row.age_days) + ' without a token, capped at four years.'),
+      factor('Category factor', '× ' + fmtFactor(row.category_multiplier), (row.category || 'Other') + ' gets a small, stated adjustment.')
+    ));
     if (isLive && row.mcap_usd !== null) {
-      impliedSection.appendChild(el('div', { class: 'decomp' }, decomp('Recorded market cap', fmtUsd(row.mcap_usd), true)));
+      impliedSection.appendChild(el('div', { class: 'decomp' }, decomp('Recorded market cap', fmtUsd(row.mcap_usd), 'The market value the token already trades at, shown as a comparison.', true)));
     }
     body.appendChild(impliedSection);
 

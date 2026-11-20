@@ -334,7 +334,7 @@ function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
-/** How much capital one farm position needs, from the protocol's own TVL scale. */
+/** How much a first farm position needs, from the protocol's own TVL scale. */
 function capitalFor(p: SnapshotProtocol): number {
   if (p.tvl_usd >= 5_000_000_000) return 300;
   if (p.tvl_usd >= 1_000_000_000) return 200;
@@ -353,76 +353,213 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** The category's one action, in the words a farmer can follow. */
-function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
+/** A chain's rough gas level, so every plan quotes a chain-specific cost instead of one flat number. */
+interface ChainGas {
+  label: string;
+  setup: string;
+  weekly: string;
+  exit: string;
+  bridge: string;
+  buffer: string;
+}
+
+function chainGas(chain: string): ChainGas {
+  const c = chain.toLowerCase();
+  if (c.includes('ethereum')) {
+    return { label: 'Ethereum gas', setup: '$4-15', weekly: '$2-8', exit: '$4-15', bridge: '$8-25', buffer: '$15-30' };
+  }
+  if (c.includes('solana') || c.includes('sui') || c.includes('aptos') || c.includes('hyperliquid') || c.includes('sei') || c.includes('sonic')) {
+    return { label: 'low-fee chain gas', setup: 'under $0.10', weekly: 'under $0.05', exit: 'under $0.10', bridge: '$0.10-0.60', buffer: 'under $2' };
+  }
+  if (c.includes('tron')) {
+    return { label: 'Tron bandwidth/energy', setup: '$0.50-2', weekly: '$0.30-1', exit: '$0.50-2', bridge: '$1-4', buffer: '$3-8' };
+  }
+  if (c.includes('binance') || c.includes('bsc') || c.includes('bnb')) {
+    return { label: 'BNB Chain gas', setup: '$0.20-0.80', weekly: '$0.15-0.60', exit: '$0.20-0.80', bridge: '$0.50-2', buffer: '$2-6' };
+  }
+  if (c.includes('bitcoin') || c.includes('lightning') || c.includes('btc')) {
+    return { label: 'Bitcoin fees', setup: '$1-6', weekly: '$0.50-3', exit: '$1-6', bridge: '$2-8', buffer: '$8-20' };
+  }
+  if (c.includes('avalanche') || c.includes('polygon') || c.includes('gnosis') || c.includes('fantom')) {
+    return { label: 'low-cost EVM gas', setup: '$0.05-0.30', weekly: '$0.03-0.20', exit: '$0.05-0.30', bridge: '$0.50-2', buffer: '$2-6' };
+  }
+  return { label: 'chain gas', setup: '$0.05-0.60', weekly: '$0.05-0.30', exit: '$0.05-0.60', bridge: '$0.30-2', buffer: '$2-6' };
+}
+
+/** The category's action, its exit trigger and its setup time, in words a farmer can follow. */
+interface CategoryPlan {
+  action: string;
+  exit: string;
+  time: string;
+}
+
+function categoryPlan(p: SnapshotProtocol, capital: number, chain: string): CategoryPlan {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Supply $${capital} of USDC to ${name} on ${chain} and keep the position open.`;
-  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return `Provide $${capital} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
-  if (c.includes('bridge')) return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
-  if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
-  if (c.includes('perpetual') || c.includes('derivative')) return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
-  if (c.includes('prediction')) return `Fund $${capital} and place one market position on ${name}.`;
-  if (c.includes('curator') || c.includes('allocator')) return `Deposit $${capital} into a ${name} vault on ${chain} and keep the shares.`;
-  if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
-  if (c.includes('rwa')) return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
-  if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
-  return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
+  if (c.includes('dex') || c.includes('liquidity manager')) {
+    return {
+      action: `Provide $${capital} of liquidity to ${name}'s deepest pool on ${chain}; start with one range and keep half in the base asset.`,
+      exit: `Exit if 7-day volume halves, fee APR drops below 10%, or price leaves your range for two days; withdraw both tokens.`,
+      time: '25 minutes to set up',
+    };
+  }
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) {
+    return {
+      action: `Supply $${capital} of USDC to ${name} on ${chain}, then borrow at most 25% against it if the protocol rewards borrowing.`,
+      exit: `Exit if utilization stays above 90%, borrow APR doubles, or health factor falls under 1.5; repay first, then withdraw.`,
+      time: '15 minutes to set up',
+    };
+  }
+  if (c.includes('perpetual') || c.includes('derivative') || c.includes('basis') || c.includes('synthetic')) {
+    return {
+      action: `Deposit $${capital} of USDC as margin on ${name} on ${chain} and open one small hedge or basis position.`,
+      exit: `Exit if funding turns against you for two days, margin ratio falls under 150%, or open interest halves; close the perp first.`,
+      time: '20 minutes to set up',
+    };
+  }
+  if (c.includes('yield')) {
+    return {
+      action: `Deposit $${capital} of USDC into ${name}'s vault on ${chain} and keep the receipt token in the same wallet.`,
+      exit: `Exit if reported APY halves, the strategy or curator changes, or withdrawals queue more than 48 hours; redeem to the base asset.`,
+      time: '10 minutes to set up',
+    };
+  }
+  if (c.includes('liquid staking') || c.includes('restak') || c.includes('staking')) {
+    return {
+      action: `Stake $${capital} of ${chain}'s staking asset through ${name} and keep the liquid receipt token.`,
+      exit: `Exit if the validator set changes, a slashing event appears, or the unbonding queue passes 14 days; unstake and wait for settlement.`,
+      time: '15 minutes plus unbonding',
+    };
+  }
+  if (c.includes('bridge') || c.includes('cross chain')) {
+    return {
+      action: `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds inside its app.`,
+      exit: `Exit if bridge TVL drops sharply, a withdrawal takes over 24 hours, or the route is paused; bridge back before adding funds.`,
+      time: '20 minutes to set up',
+    };
+  }
+  if (c.includes('rwa') || c.includes('anchor btc') || c.includes('decentralized btc')) {
+    return {
+      action: `Mint or deposit $${capital} of ${name}'s yield asset on ${chain} and keep the redemption record.`,
+      exit: `Exit if the issuer changes redemption terms, NAV stalls, or transfer restrictions tighten; redeem in an open window.`,
+      time: '25 minutes including checks',
+    };
+  }
+  if (c.includes('insurance')) {
+    return {
+      action: `Buy $${capital} of cover from ${name} on ${chain} and keep the policy document.`,
+      exit: `Exit if coverage terms change or the underwriter's capital falls; let the policy expire instead of paying a cancel fee.`,
+      time: '10 minutes to set up',
+    };
+  }
+  if (c.includes('curator') || c.includes('allocator')) {
+    return {
+      action: `Deposit $${capital} into a ${name} vault on ${chain} and keep the shares.`,
+      exit: `Exit if the curator raises fees, changes allocation outside the stated mandate, or vault TVL halves; redeem shares.`,
+      time: '10 minutes to set up',
+    };
+  }
+  if (c === 'chain') {
+    return {
+      action: `Bridge or stake $${capital} on ${name} through its official bridge or staking page, then use one native app.`,
+      exit: `Exit if chain TVL or validator count falls for two weeks, or the bridge back is paused; move activity to a second chain.`,
+      time: '20 minutes to set up',
+    };
+  }
+  if (c.includes('index')) {
+    return {
+      action: `Mint $${capital} of ${name}'s index token on ${chain} and keep the basket receipt.`,
+      exit: `Exit if the index methodology changes or the basket's liquidity thins; redeem to the base asset.`,
+      time: '15 minutes to set up',
+    };
+  }
+  if (c.includes('stable')) {
+    return {
+      action: `Mint or deposit $${capital} of ${name}'s stable asset on ${chain} and keep the receipt.`,
+      exit: `Exit if the peg leaves 1% for a day or redemption is paused; redeem to USDC.`,
+      time: '15 minutes to set up',
+    };
+  }
+  if (c.includes('prediction')) {
+    return {
+      action: `Fund $${capital} on ${name} on ${chain} and place one small market position.`,
+      exit: `Exit when the market resolves or the odds move 20 points against you; withdraw the remainder.`,
+      time: '15 minutes to set up',
+    };
+  }
+  if (c.includes('leveraged')) {
+    return {
+      action: `Open a small $${capital} leveraged position through ${name} on ${chain} with at most 2x leverage.`,
+      exit: `Exit if the collateral ratio falls under 150%, funding turns against you, or vault TVL halves; close before adding margin.`,
+      time: '20 minutes to set up',
+    };
+  }
+  return {
+    action: `Deposit $${capital} of USDC into ${name} on ${chain} and keep the receipt token.`,
+    exit: `Exit if TVL falls by a third in a week, withdrawals pause, or the reward terms change; withdraw and stop.`,
+    time: '15 minutes to set up',
+  };
 }
 
 /** The chain and chain-count guidance a farm plan needs, from the protocol's own chains. */
-function chainStep(p: SnapshotProtocol, capital: number): FarmStep {
+function chainStep(p: SnapshotProtocol, capital: number, gas: ChainGas): FarmStep {
   if (p.chains.length > 1) {
     const spread = Math.min(p.chains.length, 3);
     const named = p.chains.slice(0, spread).join(', ');
     return {
-      text: `Split the position over ${spread} of ${p.name}'s ${p.chains.length} chains (${named}) so one chain's outage does not reset your history.`,
-      cost: `$${capital} split across ${spread} positions and about $${spread * 3} of bridge and gas fees`,
+      text: `Split the $${capital} across up to ${spread} of ${p.name}'s ${p.chains.length} chains (${named}); bridge only what you will farm and check each chain's gas before moving.`,
+      cost: `${gas.label} bridge about ${gas.bridge} per bridge, plus destination-chain gas`,
       time: `${spread * 20} minutes to set up`,
     };
   }
   return {
-    text: `Keep the whole position on ${chainOf(p)}, ${p.name}'s deepest market, so the qualifying balance stays above the protocol's minimum.`,
-    cost: `no extra fee beyond the $${capital} position`,
-    time: '5 minutes',
+    text: `Keep the $${capital} on ${chainOf(p)}, ${p.name}'s deepest market; do not bridge for a single-chain protocol.`,
+    cost: `no bridge; ${gas.label} about ${gas.setup} for setup and approvals`,
+    time: '5 minutes to set up',
   };
 }
 
-/** A pre-token protocol's plan: category action, chains, TVL scale, age, costs and times. */
+/** A pre-token protocol's plan: category action, chains, TVL scale, age, costs, exit and log. */
 function preTokenSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
+  const gas = chainGas(chain);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
-  const gas = capital >= 150 ? 8 : 4;
+  const plan = categoryPlan(p, capital, chain);
   return [
     {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
-      cost: 'under $3 of gas for the first transaction',
-      time: '5 minutes',
+      text: `Start with a fresh wallet and a first position of $${capital} on ${chain}; keep ${gas.buffer} aside for gas and never reuse a wallet that already holds other airdrops.`,
+      cost: `$${capital} working capital plus ${gas.buffer} gas buffer`,
+      time: '10 minutes to set up',
     },
     {
-      text: actionFor(p, capital, chain),
-      cost: `$${capital} of capital and about $${gas} of gas`,
-      time: '15 minutes to set up',
+      text: plan.action,
+      cost: `$${capital} position; ${gas.label} about ${gas.setup} for setup and approvals`,
+      time: plan.time,
     },
-    chainStep(p, capital),
+    chainStep(p, capital, gas),
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
-      cost: 'about $2 of gas a week',
+      text: `Make one qualifying action each week on ${chain}, such as a deposit, borrow, swap or vote, and keep the size steady.`,
+      cost: `${gas.label} about ${gas.weekly} a week`,
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
-      cost: `the $${capital} stays in the position`,
+      text: `Hold the position for at least ${hold} days so it is counted in more than one snapshot; keep the receipt token in the same wallet.`,
+      cost: `the $${capital} stays in the position; no extra fee`,
       time: `${hold} days`,
     },
     {
-      text: `Before you withdraw, open ${p.name}'s own points or rewards page and claim only from the link it publishes.`,
-      cost: 'no fee to check, and never pay to claim',
+      text: plan.exit,
+      cost: `${gas.label} about ${gas.exit} to exit`,
+      time: '10-20 minutes to unwind',
+    },
+    {
+      text: `Before you withdraw, check ${p.name}'s own points or rewards page and claim only from the link it publishes; never pay to claim.`,
+      cost: `no fee to check; claim gas about ${gas.exit}`,
       time: '10 minutes',
     },
     {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
+      text: `Log the wallet, dates, deposits, gas and the exit trigger in a farm journal so you can repeat or unwind the position.`,
       cost: 'nothing but the log',
       time: '5 minutes',
     },
@@ -432,7 +569,9 @@ function preTokenSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
 /** An already-issued protocol's plan: it is a comparison row, not a pre-token farm target. */
 function liveTokenSteps(p: SnapshotProtocol): FarmStep[] {
   const chain = chainOf(p);
+  const gas = chainGas(chain);
   const capital = capitalFor(p);
+  const plan = categoryPlan(p, capital, chain);
   return [
     {
       text: `${p.name} already records a token${p.symbol === null ? '' : ` (${p.symbol})`}; treat this row as an already-issued comparison, not an airdrop target.`,
@@ -445,13 +584,18 @@ function liveTokenSteps(p: SnapshotProtocol): FarmStep[] {
       time: '10 minutes',
     },
     {
-      text: `If you still want exposure, ${actionFor(p, capital, chain).replace(/^./, (c) => c.toLowerCase())}`,
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
-      time: '15 minutes to set up',
+      text: `If you still want exposure, ${plan.action.replace(/^./, (ch) => ch.toLowerCase())}`,
+      cost: `$${capital} position; ${gas.label} about ${gas.setup} for setup`,
+      time: plan.time,
+    },
+    {
+      text: plan.exit,
+      cost: `${gas.label} about ${gas.exit} to exit`,
+      time: '10-20 minutes to unwind',
     },
     {
       text: `Watch ${p.name}'s token liquidity and unlock schedule before using its market cap as a benchmark for younger protocols.`,
-      cost: 'no capital to watch, and only trading fees if you trade',
+      cost: 'no capital to watch; trading fees only if you trade',
       time: '15 minutes a month',
     },
     {
