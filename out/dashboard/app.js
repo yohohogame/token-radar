@@ -336,7 +336,10 @@
         }
       }
     },
-      el('td', { class: 'rank-cell' }, el('span', { class: rankClass, text: String(r.rank) })),
+      el('td', { class: 'rank-cell' },
+        isLive ? el('span', { class: 'row-tag', text: 'REF' }) : null,
+        el('span', { class: rankClass, text: String(r.rank) })
+      ),
       el('td', null,
         el('span', { class: 'name-main', text: r.name }),
         el('span', { class: 'name-sub', text: (r.category || 'Other') + ' · ' + chains })
@@ -362,7 +365,7 @@
     var head = el('div', { class: 'board-head' },
       el('div', null,
         el('h2', { text: 'Ranked board' }),
-        el('p', { class: 'board-method', text: 'Method: implied = TVL × log-compressed multiple × tanh(7d growth) × maturity × category. Every input is from the snapshot; no name list.' }),
+        el('p', { class: 'board-method', text: 'Method: implied = TVL × log-compressed multiple × tanh(7d growth) × maturity × category × live-peer anchor. Snapshot inputs only; no name list.' }),
         el('span', { class: 'board-note', text: state.status === 'pre-token' ? 'Pre-token ranks, strongest model value first.' : state.status === 'live-token' ? 'Already-issued rows, shown as comparisons against the model.' : 'Every board row, pre-token and already-issued together.' })
       ),
       el('span', { class: 'board-note', text: list.length + ' shown · click a row for its model and farm plan' })
@@ -392,7 +395,10 @@
               th('growth', '7d growth', true),
               th('age', 'Age', true),
               th('implied', 'Implied value', true),
-              el('th', { scope: 'col', text: 'Token' })
+              el('th', { scope: 'col' },
+                el('span', { class: 'th-main', text: 'Token' }),
+                el('span', { class: 'th-note', text: 'grey = comparison: issued' })
+              )
             )
           ),
           tbody
@@ -413,7 +419,7 @@
         'baseMultiple = clamp(' + m.base_multiple + ' × (1 + ' + m.tvl_log_weight + ' × log10(' + fmtUsd(m.reference_tvl_usd) + ' / TVL)), ' + m.base_multiple_min + ', ' + m.base_multiple_max + ')\n' +
         'growth       = 1 + ' + m.growth_weight + ' × tanh(clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / ' + m.growth_scale + ')\n' +
         'maturity     = ' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' × ' + m.maturity_range + '\n' +
-        'implied      = round(TVL × baseMultiple × growth × maturity × categoryFactor)'
+        'implied      = round(TVL × baseMultiple × growth × maturity × categoryFactor × anchorFactor)'
       ),
       el('div', { class: 'model-grid' },
         el('div', { class: 'model-card' }, el('b', { text: 'TVL compression' }), el('span', { text: 'A log term lowers the multiple on the largest TVL and raises it on smaller protocols, so the head does not own the board.' })),
@@ -421,7 +427,7 @@
         el('div', { class: 'model-card' }, el('b', { text: 'Time without a token' }), el('span', { text: 'The longer a protocol has run with no token, the more its record can support an airdrop, capped at ' + Math.round(m.maturity_days / 365) + ' years.' })),
         el('div', { class: 'model-card' }, el('b', { text: 'Category factor' }), el('span', { text: 'A small adjustment from ' + fmtFactor(catMin) + ' to ' + fmtFactor(catMax) + ', stated on every detail view.' }))
       ),
-      el('p', { class: 'footnote', text: 'Missing change_7d is neutral; a missing listing date uses ' + m.unknown_age_days + ' days. Live-token rows use the same arithmetic but are labelled comparisons, never pre-token claims.' })
+      el('p', { class: 'footnote', text: 'Missing change_7d is neutral; a missing listing date uses ' + m.unknown_age_days + ' days. Pre-token rows also use a live-peer anchor when at least ' + m.anchor_min_peers + ' live peers exist. Live-token rows are labelled comparisons, never pre-token claims.' })
     );
   }
 
@@ -446,20 +452,26 @@
     );
   }
 
-  function decomp(label, value, reason, total) {
-    return el('div', { class: 'decomp-row' + (total ? ' total' : '') },
-      el('span', { class: 'decomp-label', text: label }),
-      el('b', { text: value }),
-      reason ? el('span', { class: 'decomp-reason', text: reason }) : null
-    );
-  }
-
   function factor(label, value, reason) {
     return el('div', { class: 'factor' },
       el('span', { text: label }),
       el('b', { text: value }),
       el('small', { text: reason })
     );
+  }
+
+  function riskNotes(row) {
+    var notes = [];
+    if (row.change_7d !== null && row.change_7d <= -20) notes.push('7-day TVL fell ' + fmtPct(row.change_7d) + '; outflow and withdrawal pressure are the first risks to check.');
+    if (row.change_7d !== null && row.change_7d >= 50) notes.push('7-day TVL rose ' + fmtPct(row.change_7d) + '; hot-money inflows can reverse quickly.');
+    if (row.change_7d === null) notes.push('No 7-day change is reported; the growth factor is neutral and the data is thinner.');
+    if (row.age_days === null || row.age_days < 180) notes.push('Track record is short or unknown (' + fmtAgeLong(row.age_days) + '); treat the maturity factor as indicative.');
+    if (row.chains && row.chains.length >= 5) notes.push('Deployed on ' + row.chains.length + ' chains; liquidity and activity are fragmented across bridges.');
+    if (row.tvl_usd < DATA.floor_usd) notes.push('TVL is below the $' + Math.round(DATA.floor_usd / 1e6) + 'M watchlist floor; liquidity can be thinner.');
+    if (row.token_status === 'live-token') notes.push('Already issued: this is a calibration comparison, not a pre-token farm target.');
+    if (notes.length < 2) notes.push('No single red flag in the snapshot; the implied value is still a model estimate, not a price.');
+    if (notes.length < 2) notes.push('Check the protocol\'s own docs and withdrawal terms before committing capital.');
+    return notes.slice(0, 3);
   }
 
   function openDetail(slug, silent) {
@@ -486,6 +498,11 @@
       el('span', { class: 'badge', text: DATA.model_version + ' model' })
     ));
 
+    body.appendChild(el('section', { class: 'risk-block' },
+      el('h3', { text: 'Risks & notes' }),
+      el('ul', { class: 'risk-list' }, riskNotes(row).map(function (note) { return el('li', { text: note }); }))
+    ));
+
     var impliedSection = el('section', { class: 'detail-section' },
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'big-value' },
@@ -494,16 +511,18 @@
       ),
       el('p', { class: 'value-note', text: isLive ? 'This token already trades. The value below is the model applied to its TVL, shown as a comparison against its recorded market cap.' : 'An estimate of what a token could be worth if the protocol record stayed as it is. It is not a price and not a promise that a token will be issued.' })
     );
-    impliedSection.appendChild(el('div', { class: 'value-formula', text: 'round(' + fmtUsd(row.tvl_usd) + ' × ' + fmtMult(row.base_multiple) + ' × ' + fmtMult(row.growth_multiplier) + ' × ' + fmtMult(row.maturity_multiplier) + ' × ' + fmtFactor(row.category_multiplier) + ') = ' + fmtUsd(row.implied_value_usd) }));
+    impliedSection.appendChild(el('div', { class: 'value-formula', text: 'round(' + fmtUsd(row.tvl_usd) + ' × ' + fmtMult(row.base_multiple) + ' × ' + fmtMult(row.growth_multiplier) + ' × ' + fmtMult(row.maturity_multiplier) + ' × ' + fmtFactor(row.category_multiplier) + ' × anchor ' + fmtFactor(row.anchor_multiplier) + ') = ' + fmtUsd(row.implied_value_usd) }));
+    var rowRatio = row.token_status === 'live-token' && row.mcap_usd !== null && row.mcap_usd > 0 ? row.tvl_usd / row.mcap_usd : row.tvl_usd / row.implied_value_usd;
+    var peerText = row.peer_median_tvl_mcap === null
+      ? 'No live token with a market cap in this category; no peer anchor applied.'
+      : 'Median TVL/mcap of ' + row.peer_count + ' live ' + (row.category || 'peer') + ' protocol' + (row.peer_count === 1 ? '' : 's') + '; this row is ' + fmtFactor(rowRatio) + '× TVL/implied, anchor ×' + fmtFactor(row.anchor_multiplier) + (row.peer_count < DATA.model.anchor_min_peers ? ' (sample <' + DATA.model.anchor_min_peers + ', not applied).' : '.');
     impliedSection.appendChild(el('div', { class: 'factor-grid' },
       factor('Base · TVL × multiple', '× ' + fmtMult(row.base_multiple), fmtUsd(row.tvl_usd) + ' TVL; log compression keeps the largest protocol from owning the board.'),
       factor('Growth factor', '× ' + fmtMult(row.growth_multiplier), fmtPct(row.change_7d) + ' over 7d, passed through tanh so the move stays mild and monotonic.'),
       factor('Maturity factor', '× ' + fmtMult(row.maturity_multiplier), fmtAgeLong(row.age_days) + ' without a token, capped at four years.'),
-      factor('Category factor', '× ' + fmtFactor(row.category_multiplier), (row.category || 'Other') + ' gets a small, stated adjustment.')
+      factor('Category factor', '× ' + fmtFactor(row.category_multiplier), (row.category || 'Other') + ' gets a small, stated adjustment.'),
+      factor('Live peer anchor', row.peer_median_tvl_mcap === null ? '—' : fmtFactor(row.peer_median_tvl_mcap) + '×', peerText)
     ));
-    if (isLive && row.mcap_usd !== null) {
-      impliedSection.appendChild(el('div', { class: 'decomp' }, decomp('Recorded market cap', fmtUsd(row.mcap_usd), 'The market value the token already trades at, shown as a comparison.', true)));
-    }
     body.appendChild(impliedSection);
 
     var facts = el('div', { class: 'fact-grid' },
@@ -568,7 +587,14 @@
       hero(),
       controls(),
       boardPanel(),
-      modelPanel()
+      modelPanel(),
+      el('footer', { class: 'foot' },
+        el('strong', { text: 'Method & disclosure' }),
+        el('p', { text: 'Data: every figure comes from the sealed DefiLlama snapshot (as of ' + DATA.as_of + '); the page makes no network call.' }),
+        el('p', { text: 'Implied value: what a token could be worth if the protocol record stayed as it is, from TVL, 7d growth, time since listing, category and live-peer anchors.' }),
+        el('p', { text: 'The board is a research tool, not a price feed, and an implied value is not a promise that a token will be issued.' }),
+        el('p', { text: 'Not investment advice. Verify contracts, withdrawal terms and risks before using any protocol.' })
+      )
     ));
     root.setAttribute('aria-busy', 'false');
     if (state.selected) openDetail(state.selected, true);

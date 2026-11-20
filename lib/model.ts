@@ -61,6 +61,10 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
+  anchor_weight: number;
+  anchor_floor: number;
+  anchor_cap: number;
+  anchor_min_peers: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -77,10 +81,14 @@ export const MODEL: ModelConstants = {
   maturity_range: 0.55,
   maturity_days: 1460,
   unknown_age_days: 365,
+  anchor_weight: 0.15,
+  anchor_floor: 0.75,
+  anchor_cap: 1.35,
+  anchor_min_peers: 3,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 136;
@@ -111,6 +119,10 @@ export interface BoardRow {
   token_status: 'pre-token' | 'live-token';
   age_days: number | null;
   implied_value_usd: number;
+  model_implied_usd: number;
+  anchor_multiplier: number;
+  peer_median_tvl_mcap: number | null;
+  peer_count: number;
   model: {
     base_multiple: number;
     growth_pct: number;
@@ -136,6 +148,10 @@ export interface RadarRow {
   age_days: number | null;
   token_status: 'pre-token' | 'live-token';
   implied_value_usd: number;
+  model_implied_usd: number;
+  anchor_multiplier: number;
+  peer_median_tvl_mcap: number | null;
+  peer_count: number;
   base_multiple: number;
   category_multiplier: number;
   growth_multiplier: number;
@@ -266,6 +282,32 @@ function liveComparisonProtocols(snapshot: Snapshot): SnapshotProtocol[] {
     .slice(0, LIVE_ROWS);
 }
 
+/** A category's live-token TVL/market-cap median: the snapshot's own comparable valuation anchor. */
+export interface CategoryAnchor {
+  category: string;
+  median_tvl_mcap: number;
+  count: number;
+}
+
+export function categoryAnchors(snapshot: Snapshot): Map<string, CategoryAnchor> {
+  const groups = new Map<string, number[]>();
+  for (const p of snapshot.protocols) {
+    if (isPreToken(p) || p.category === null || p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) continue;
+    const ratio = p.tvl_usd / p.mcap_usd;
+    const list = groups.get(p.category);
+    if (list) list.push(ratio);
+    else groups.set(p.category, [ratio]);
+  }
+  const out = new Map<string, CategoryAnchor>();
+  for (const [category, ratios] of groups) {
+    ratios.sort((a, b) => a - b);
+    const n = ratios.length;
+    const median = n % 2 === 1 ? ratios[(n - 1) / 2]! : (ratios[n / 2 - 1]! + ratios[n / 2]!) / 2;
+    out.set(category, { category, median_tvl_mcap: median, count: n });
+  }
+  return out;
+}
+
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = bySlug(snapshot.protocols);
@@ -287,9 +329,20 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   // modelled value is shown beside the market cap, never mixed into the pre-token claim.
   for (const p of liveComparisonProtocols(snapshot)) chosen.set(p.slug, p);
 
+  const anchors = categoryAnchors(snapshot);
   const scored = [...chosen.values()].map((p) => {
-    const { implied, baseMultiple, categoryMult, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, baseMultiple, categoryMult, growthPct, growthMult, maturityMult, age };
+    const v = impliedValue(p, snapshot.as_of, model);
+    const anchor = p.category === null ? undefined : anchors.get(p.category);
+    const peerMedian = anchor === undefined ? null : anchor.median_tvl_mcap;
+    const peerCount = anchor === undefined ? 0 : anchor.count;
+    let anchorMultiplier = 1;
+    if (isPreToken(p) && anchor !== undefined && anchor.count >= model.anchor_min_peers) {
+      const anchorImplied = p.tvl_usd / anchor.median_tvl_mcap;
+      const raw = Math.pow(anchorImplied / v.implied, model.anchor_weight);
+      anchorMultiplier = Math.min(model.anchor_cap, Math.max(model.anchor_floor, raw));
+    }
+    const implied = Math.max(1, Math.round(v.implied * anchorMultiplier));
+    return { p, implied, modelImplied: v.implied, anchorMultiplier, peerMedian, peerCount, baseMultiple: v.baseMultiple, categoryMult: v.categoryMult, growthPct: v.growthPct, growthMult: v.growthMult, maturityMult: v.maturityMult, age: v.age };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -307,6 +360,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: isPreToken(s.p) ? 'pre-token' : 'live-token',
     age_days: s.age,
     implied_value_usd: s.implied,
+    model_implied_usd: s.modelImplied,
+    anchor_multiplier: round4(s.anchorMultiplier),
+    peer_median_tvl_mcap: s.peerMedian === null ? null : round4(s.peerMedian),
+    peer_count: s.peerCount,
     model: {
       base_multiple: round4(s.baseMultiple),
       growth_pct: s.growthPct,
@@ -647,6 +704,10 @@ export function radarRow(row: BoardRow): RadarRow {
     age_days: row.age_days,
     token_status: row.token_status,
     implied_value_usd: row.implied_value_usd,
+    model_implied_usd: row.model_implied_usd,
+    anchor_multiplier: row.anchor_multiplier,
+    peer_median_tvl_mcap: row.peer_median_tvl_mcap,
+    peer_count: row.peer_count,
     base_multiple: row.model.base_multiple,
     category_multiplier: row.model.category_multiplier,
     growth_multiplier: row.model.growth_multiplier,
